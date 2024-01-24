@@ -119,17 +119,25 @@ def plot_dlib_landmark(img, landmark_array) -> None:
 
 
 def load_300W_dataset():
+    """
+    image is in RGB order
+    """
     ds = deeplake.load("hub://activeloop/300w", verbose=False)
     images = ds.images
     keypoints = ds.keypoints
 
-    sample_image = images[27].numpy() # (H, W, 3)
-    sample_keypoints = keypoints[27].numpy().squeeze().reshape(-1, 3) # (204,)
+    sample_image = images[27].numpy()  # (H, W, 3)
+    sample_keypoints = keypoints[27].numpy().squeeze().reshape(-1, 3)  # (68, 3)
+    canvas = copy.deepcopy(sample_image)
 
-    for keypoint in range(sample_keypoints.shape[0]):
-        # plot all keypoints on the image
-        pass
+    for idx in range(sample_keypoints.shape[0]):
+        x, y, v = sample_keypoints[idx]
+        if v == 0:  # keypoint not in image
+            continue
 
+        canvas = cv2.circle(canvas, (x, y), 0, (50, 255, 50), 5)
+
+    cv2.imwrite(img_save_path, cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 
 if __name__ == "__main__":
     dir_name = Path("./assets/trump/")
@@ -139,7 +147,7 @@ if __name__ == "__main__":
     # bbox_json_path = dir_name / "face_0.json"
 
     dlib_weight_path = "./spiga/models/weights/shape_predictor_68_face_landmarks.dat"
-    img_save_path = "./sample_image4-1.png"
+    img_save_path = "./sample_image5.png"
 
     # spiga_infer(str(img_path), str(bbox_json_path), img_save_path)
     # dlib_infer(str(img_path), str(bbox_json_path), dlib_weight_path, img_save_path)
