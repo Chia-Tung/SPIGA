@@ -40,7 +40,8 @@ class SPIGAFramework:
         # else:
         #     weights_file = os.path.join(weights_path, self.model_cfg.model_weights)
         #     model_state_dict = torch.load(weights_file)
-        model_state_dict = torch.load(os.path.join(weights_path, self.model_cfg.model_weights), map_location=torch.device('cpu'))
+        model_weights_path = os.path.join(weights_path, self.model_cfg.model_weights)
+        model_state_dict = torch.load(model_weights_path, map_location=torch.device('cpu'))
         self.model.load_state_dict(model_state_dict)
         # self.model = self.model.cuda(gpus[0])
         self.model.eval()
