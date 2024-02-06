@@ -1,8 +1,10 @@
 import copy
+import os
 import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import cv2
 import deeplake
@@ -11,9 +13,12 @@ from tqdm import tqdm
 
 from utils.spiga_manager import SpigaManager
 from utils.dlib_manager import DlibManager
+from utils.mp_landmark_wrapper import MpLandmarkWrapper
+from utils.bounding_box import Boundingbox
+from utils.mp_lm_indices import CRITICAL_POINT_INDICES
 
 
-def load_300W_dataset(spiga_manager, dlib_manager):
+def load_300W_dataset():
     """
     image is in RGB order
     """
@@ -21,11 +26,9 @@ def load_300W_dataset(spiga_manager, dlib_manager):
     images = ds.images
     keypoints = ds.keypoints
 
-    ans = []
-    for i in tqdm(range(images.shape[0])):
-        sample_image = images[i].numpy()  # (H, W, 3)
+    boxes = []
+    for i in range(images.shape[0]):
         sample_keypoints = keypoints[i].numpy().squeeze().reshape(-1, 3)  # (68, 3)
-
         x_list = []
         y_list = []
         for idx in range(sample_keypoints.shape[0]):
@@ -41,59 +44,95 @@ def load_300W_dataset(spiga_manager, dlib_manager):
             max(x_list) - min(x_list),
             max(y_list) - min(y_list),
         ]
+        boxes.append(bbox)
+    return images, keypoints, boxes
 
-        ##### SPIGA Inference #####
-        # lm_spiga, _ = spiga_manager.infer(sample_image, [bbox])
-        # lm_spiga = np.array(lm_spiga[0])  # only 1 box/image for 300W, shape is [N, 2]
-        # calculation
-        # med = np.mean(np.linalg.norm(lm_spiga - sample_keypoints[:, :2], axis=1))
-        # interocular_distance = np.linalg.norm(sample_keypoints[37, :2] - sample_keypoints[46, :2])
-        # nme = med / interocular_distance
 
-        # canvas = copy.deepcopy(sample_image)
-        # for i in range(lm_spiga.shape[0]):
-        #     x, y = [int(m) for m in lm_spiga[i]]
-        #     cv2.putText(canvas, str(i+1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA)
-        # cv2.imwrite("./sample_spiga_merlrav.png", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+def main(executor, model_name):
+    images, keypoints, boxes = load_300W_dataset()
 
-        ##### DLIB Inference #####
-        lm_dlib = dlib_manager.infer(sample_image, [bbox])
-        lm_dlib = lm_dlib[0]  # only 1 box/image for 300W, shape is [68, 2]
-        # calculation
-        med = np.mean(np.linalg.norm(lm_dlib - sample_keypoints[:, :2], axis=1))
-        interocular_distance = np.linalg.norm(sample_keypoints[37, :2] - sample_keypoints[46, :2])
-        nme = med / interocular_distance
+    batch_nme = []
+    for i in tqdm(range(images.shape[0])):
+        sample_image = images[i].numpy()  # (H, W, 3)
+        sample_box = boxes[i]  # (x0, y0, w, h)
+        sample_keypoints = keypoints[i].numpy().squeeze().reshape(-1, 3)  # (68, 3)
 
-        # canvas = copy.deepcopy(sample_image)
-        # for i in range(lm_dlib.shape[0]):
-        #     x, y = [int(m) for m in lm_dlib[i]]
-        #     cv2.putText(canvas, str(i+1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA)
-        # cv2.imwrite("./sample_dlib.png", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+        if model_name == "spiga":
+            lm, _ = executor.infer(sample_image, [sample_box])
+            lm = np.array(lm[0])  # only 1 box/image for 300W, shape is [N, 2]
+        elif model_name == "dlib":
+            lm = executor.infer(sample_image, [sample_box])
+            lm = lm[0]  # only 1 box/image for 300W, shape is [68, 2]
+        elif model_name == "mediapipe":
+            x0, y0, w, h = sample_box
+            bbox = Boundingbox([x0, y0, x0 + w, y0 + h])
+            bbox.scale(1.5)
+            driver_bbox = dict(
+                [("bounding_box", bbox), ("class_label", "face"), ("score", 1)]
+            )
+            if sample_image.shape[2] == 1:  # gray scale
+                sample_image = np.concatenate(
+                    [sample_image, sample_image, sample_image], axis=2
+                )
+            mimic_landmarks, _ = executor.process(sample_image, driver_bbox)
+            mp_lm = mimic_landmarks.parse_to_client()
+            lm = []
+            for index in CRITICAL_POINT_INDICES:
+                lm.append((mp_lm[index][0], mp_lm[index][1]))
+            lm = np.array(lm)  # [68, 2]
 
-        ##### 300W annotations #####
-        # canvas = copy.deepcopy(sample_image)
-        # for i in range(sample_keypoints.shape[0]):
-        #     x, y, v = sample_keypoints[i]
-        #     cv2.putText(canvas, str(i+1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA)
-        # cv2.imwrite("./sample_300W.png", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
-        ans.append(nme)
-    print(f"NME: {np.mean(ans):.3f}")
-    dlib_manager.show_infer_time(clear=True)
+        nme = cal_nme(sample_keypoints, lm)
+        batch_nme.append(nme)
+
+    executor.show_infer_time(clear=True)
+    print(f"NME: {np.mean(batch_nme):.3f}")
+
+
+def cal_nme(landmark_gt, landmark_pred):
+    """
+    landmark_gt: np.ndarray, (N, 3), representing x, y, v where v is visibility
+    landmark_pred: np.ndarray, (N, 2)
+    """
+    med = np.mean(np.linalg.norm(landmark_pred - landmark_gt[:, :2], axis=1))
+    interocular_distance = np.linalg.norm(landmark_gt[37, :2] - landmark_gt[46, :2])
+    nme = med / interocular_distance
+    return nme
+
+
+def plot_landmarks(img, landmarks, img_name=None, suffix=".png"):
+    """
+    img: np.ndarray, (H, W, 3), in RGB-order
+    landmarks: np.ndarray, (N, 2), N=68 for 300W dataset
+    """
+    canvas = copy.deepcopy(img)
+    for i in range(landmarks.shape[0]):
+        x, y = [int(m) for m in landmarks[i]]
+        cv2.putText(canvas, str(i + 1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA)
+    if img_name:
+        cv2.imwrite(f"./{img_name}{suffix}", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 
 
 if __name__ == "__main__":
+    # image path
     dir_name = Path("./assets/ir_people/")
-
     img_path = next(dir_name.glob("*.jpg"))
-    # bbox_json_path = next(dir_name.glob("*.json"))
-    bbox_json_path = dir_name / "face_0.json"
+    bbox_json_path = next(dir_name.glob("*.json"))
 
+    # SPIGA model
+    spiga_manager = SpigaManager("300wprivate")
+    # spiga_manager.manual_infer([img_path], [bbox_json_path], True)
+
+    # dlib model
     dlib_weight_path = Path(
         "./spiga/models/weights/shape_predictor_68_face_landmarks.dat"
     )
-
-    spiga_manager = SpigaManager("300wprivate")
-    # spiga_manager.manual_infer([img_path], [bbox_json_path], True)
     dlib_manager = DlibManager(dlib_weight_path)
     # dlib_manager.manual_infer([img_path], [bbox_json_path], True)
-    load_300W_dataset(spiga_manager, dlib_manager)
+
+    # mediapipe model
+    mediapipe_landmark_path = Path(
+        "./spiga/models/weights/face_landmark_with_attention_test.tflite"
+    )
+    mp_landmark_manager = MpLandmarkWrapper(str(mediapipe_landmark_path))
+
+    main(mp_landmark_manager, "mediapipe")
