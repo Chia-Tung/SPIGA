@@ -49,13 +49,17 @@ def load_300W_dataset():
 
 
 def main(executor, model_name):
-    images, keypoints, boxes = load_300W_dataset()
-
     batch_nme = []
-    for i in tqdm(range(images.shape[0])):
+    # for i in tqdm(range(images.shape[0])):
+    for i in tqdm([137, 159, 180]):
         sample_image = images[i].numpy()  # (H, W, 3)
         sample_box = boxes[i]  # (x0, y0, w, h)
         sample_keypoints = keypoints[i].numpy().squeeze().reshape(-1, 3)  # (68, 3)
+
+        if sample_image.shape[2] == 1:  # gray scale
+            sample_image = np.concatenate(
+                [sample_image, sample_image, sample_image], axis=2
+            )
 
         if model_name == "spiga":
             lm, _ = executor.infer(sample_image, [sample_box])
@@ -70,10 +74,6 @@ def main(executor, model_name):
             driver_bbox = dict(
                 [("bounding_box", bbox), ("class_label", "face"), ("score", 1)]
             )
-            if sample_image.shape[2] == 1:  # gray scale
-                sample_image = np.concatenate(
-                    [sample_image, sample_image, sample_image], axis=2
-                )
             mimic_landmarks, _ = executor.process(sample_image, driver_bbox)
             mp_lm = mimic_landmarks.parse_to_client()
             lm = []
@@ -81,11 +81,13 @@ def main(executor, model_name):
                 lm.append((mp_lm[index][0], mp_lm[index][1]))
             lm = np.array(lm)  # [68, 2]
 
+        plot_landmarks(sample_image, lm, f"300W_id-{i:03d}_{model_name}")
+
         nme = cal_nme(sample_keypoints, lm)
         batch_nme.append(nme)
 
     executor.show_infer_time(clear=True)
-    print(f"NME: {np.mean(batch_nme):.3f}")
+    print(f"[{model_name}] NME: {np.mean(batch_nme):.3f}")
 
 
 def cal_nme(landmark_gt, landmark_pred):
@@ -107,9 +109,10 @@ def plot_landmarks(img, landmarks, img_name=None, suffix=".png"):
     canvas = copy.deepcopy(img)
     for i in range(landmarks.shape[0]):
         x, y = [int(m) for m in landmarks[i]]
-        cv2.putText(canvas, str(i + 1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA)
+        # cv2.putText(canvas, str(i + 1), (x, y), 0, 0.2, (0, 255, 255), 1, cv2.LINE_AA) # plot text
+        cv2.circle(canvas, (int(x), int(y)), 0, (0, 255, 255), 5)
     if img_name:
-        cv2.imwrite(f"./{img_name}{suffix}", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(f"./gallery/{img_name}{suffix}", cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 
 
 if __name__ == "__main__":
@@ -118,8 +121,10 @@ if __name__ == "__main__":
     img_path = next(dir_name.glob("*.jpg"))
     bbox_json_path = next(dir_name.glob("*.json"))
 
+    images, keypoints, boxes = load_300W_dataset()
+
     # SPIGA model
-    spiga_manager = SpigaManager("300wprivate")
+    spiga_manager = SpigaManager("cofw68")
     # spiga_manager.manual_infer([img_path], [bbox_json_path], True)
 
     # dlib model
